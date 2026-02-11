@@ -1,61 +1,49 @@
 #include "../engine.hpp"
-#include <string>
-#include <unordered_map>
-#include <iostream>
 
-// Mapa de teclas: String de Lua -> Scancode de SDL
-// Esto permite que en Lua escribas input.down("jump") o input.down("z")
-static std::unordered_map<std::string, SDL_Scancode> key_map = {
-    {"up", SDL_SCANCODE_UP},
-    {"down", SDL_SCANCODE_DOWN},
-    {"left", SDL_SCANCODE_LEFT},
-    {"right", SDL_SCANCODE_RIGHT},
-    {"z", SDL_SCANCODE_Z},         // Dash / Jump
-    {"x", SDL_SCANCODE_X},         // Shoot
-    {"c", SDL_SCANCODE_C},         // Special
-    {"enter", SDL_SCANCODE_RETURN}, // Start
-    {"escape", SDL_SCANCODE_ESCAPE},
-    {"space", SDL_SCANCODE_SPACE}
-};
+// Mapeo simple de Scancodes (Teclado) a Botones (Gamepad)
+static int map_key_to_button(int scancode) {
+    switch (scancode) {
+        case SDL_SCANCODE_Z:     return SDL_CONTROLLER_BUTTON_A;
+        case SDL_SCANCODE_X:     return SDL_CONTROLLER_BUTTON_X;
+        case SDL_SCANCODE_C:     return SDL_CONTROLLER_BUTTON_B;
+        case SDL_SCANCODE_UP:    return SDL_CONTROLLER_BUTTON_DPAD_UP;
+        case SDL_SCANCODE_DOWN:  return SDL_CONTROLLER_BUTTON_DPAD_DOWN;
+        case SDL_SCANCODE_LEFT:  return SDL_CONTROLLER_BUTTON_DPAD_LEFT;
+        case SDL_SCANCODE_RIGHT: return SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
+        case SDL_SCANCODE_RETURN: return SDL_CONTROLLER_BUTTON_START;
+        default: return -1;
+    }
+}
 
-// input.down(key_name)
-// Retorna true si la tecla está presionada en este frame
-static int l_input_down(lua_State* L) {
-    const char* key_name = luaL_checkstring(L, 1);
+// Lua: input.is_down(scancode)
+static int l_is_down(lua_State* L) {
+    int key = luaL_checkinteger(L, 1);
 
-    // Buscar la tecla en nuestro mapa
-    auto it = key_map.find(key_name);
-    if (it == key_map.end()) {
-        // Si no conocemos la tecla, retornamos false (o podríamos lanzar error)
-        lua_pushboolean(L, false);
-        return 1;
+    // 1. Chequear Teclado
+    const Uint8* state = SDL_GetKeyboardState(NULL);
+    bool down = state[key];
+
+    // 2. Chequear Mando (si no se pulsó en teclado)
+    if (!down && engine.controller) {
+        int btn = map_key_to_button(key);
+        if (btn != -1) {
+            down = SDL_GameControllerGetButton(engine.controller, (SDL_GameControllerButton)btn);
+        }
     }
 
-    // Leer estado real de SDL
-    const Uint8* state = SDL_GetKeyboardState(NULL);
-    bool is_down = state[it->second];
-
-    lua_pushboolean(L, is_down);
+    lua_pushboolean(L, down);
     return 1;
 }
 
-// input.quit()
-// Helper para cerrar el juego desde Lua (útil para desarrollo)
-static int l_input_quit(lua_State* L) {
-    SDL_Event quit_event;
-    quit_event.type = SDL_QUIT;
-    SDL_PushEvent(&quit_event);
-    return 0;
-}
-
-// Registro de la librería 'input'
-static const luaL_Reg input_lib[] = {
-    {"down", l_input_down},
-    {"quit", l_input_quit},
+// Array de funciones a registrar
+static const struct luaL_Reg input_lib[] = {
+    {"is_down", l_is_down}, // <--- ESTA LÍNEA ES CRÍTICA
     {NULL, NULL}
 };
 
+// Función de apertura del módulo
 int luaopen_input(lua_State* L) {
-    luaL_newlib(L, input_lib);
+    std::cout << "[DEBUG] Registrando modulo 'input'..." << std::endl;
+    luaL_register(L, "input", input_lib);
     return 1;
 }

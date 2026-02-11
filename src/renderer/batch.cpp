@@ -1,68 +1,53 @@
 #include "../engine.hpp"
 #include <vector>
 
-// --- CONSTANTES ---
-const int MAX_QUADS = 1000; // Máximos sprites por draw call
-const int MAX_VERTICES = MAX_QUADS * 4;
-const int MAX_INDICES = MAX_QUADS * 6;
-
-// --- SHADERS (GLSL) ---
-const char* VERTEX_SOURCE = R"(
-    #version 330 core
-    layout (location = 0) in vec2 aPos;
-    layout (location = 1) in vec2 aTexCoord;
-    layout (location = 2) in vec4 aColor;
-
-    out vec2 TexCoord;
-    out vec4 Color;
-
-    uniform mat4 projection;
-
-    void main() {
-        gl_Position = projection * vec4(aPos, 0.0, 1.0);
-        TexCoord = aTexCoord;
-        Color = aColor;
-    }
-)";
-
-const char* FRAGMENT_SOURCE = R"(
-    #version 330 core
-    out vec4 FragColor;
-
-    in vec2 TexCoord;
-    in vec4 Color;
-
-    uniform sampler2D image;
-
-    void main() {
-        FragColor = texture(image, TexCoord) * Color;
-    }
-)";
-
-// --- ESTRUCTURAS ---
+// Estructura de Vértice para el Batch
 struct Vertex {
-    float x, y;
-    float u, v;
-    float r, g, b, a;
+    float x, y;       // Posición
+    float u, v;       // UVs
+    float r, g, b, a; // Color
 };
 
-// --- ESTADO INTERNO ---
+// Estado interno del Batch Renderer
 struct BatchState {
-    GLuint VAO, VBO, EBO;
+    GLuint VAO, VBO;
     GLuint shaderProgram;
-    GLuint currentTexture = 0;
-
     std::vector<Vertex> vertices;
-    int indexCount = 0;
-} batch;
+    // Capacidad máxima por draw call (1000 sprites * 6 vértices)
+    const size_t MAX_SPRITES = 1000;
+};
 
-// Compilar Shader Helper
+static BatchState batch;
+
+// Shaders básicos incrustados (Core Profile 3.3)
+const char* vertexShaderSource = "#version 330 core\n"
+"layout (location = 0) in vec2 aPos;\n"
+"layout (location = 1) in vec2 aTexCoord;\n"
+"layout (location = 2) in vec4 aColor;\n"
+"out vec2 TexCoord;\n"
+"out vec4 Color;\n"
+"uniform mat4 projection;\n"
+"void main() {\n"
+"   gl_Position = projection * vec4(aPos, 0.0, 1.0);\n"
+"   TexCoord = aTexCoord;\n"
+"   Color = aColor;\n"
+"}\0";
+
+const char* fragmentShaderSource = "#version 330 core\n"
+"in vec2 TexCoord;\n"
+"in vec4 Color;\n"
+"out vec4 FragColor;\n"
+"uniform sampler2D image;\n"
+"void main() {\n"
+"   FragColor = texture(image, TexCoord) * Color;\n"
+"}\0";
+
+// Función auxiliar para compilar shaders
 GLuint compileShader(GLenum type, const char* source) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, NULL);
     glCompileShader(shader);
 
-    // Check errores
     int success;
     char infoLog[512];
     glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
@@ -73,169 +58,140 @@ GLuint compileShader(GLenum type, const char* source) {
     return shader;
 }
 
-// Inicializar Render (Llamado una vez al inicio)
+// Inicialización del Renderizador
 void init_renderer() {
-    // 1. Shaders
-    GLuint vertex = compileShader(GL_VERTEX_SHADER, VERTEX_SOURCE);
-    GLuint fragment = compileShader(GL_FRAGMENT_SHADER, FRAGMENT_SOURCE);
+    // 1. Compilar Shaders
+    GLuint vertex = compileShader(GL_VERTEX_SHADER, vertexShaderSource);
+    GLuint fragment = compileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
+
     batch.shaderProgram = glCreateProgram();
     glAttachShader(batch.shaderProgram, vertex);
     glAttachShader(batch.shaderProgram, fragment);
     glLinkProgram(batch.shaderProgram);
+
+    // Verificar errores de linkeo
+    int success;
+    char infoLog[512];
+    glGetProgramiv(batch.shaderProgram, GL_LINK_STATUS, &success);
+    if(!success) {
+        glGetProgramInfoLog(batch.shaderProgram, 512, NULL, infoLog);
+        std::cerr << "[PROGRAM ERROR] " << infoLog << std::endl;
+    }
+
     glDeleteShader(vertex);
     glDeleteShader(fragment);
 
-    // 2. Buffers
+    // 2. Configurar Buffers (VAO/VBO)
     glGenVertexArrays(1, &batch.VAO);
     glGenBuffers(1, &batch.VBO);
-    glGenBuffers(1, &batch.EBO);
 
     glBindVertexArray(batch.VAO);
-
     glBindBuffer(GL_ARRAY_BUFFER, batch.VBO);
-    // Reservamos memoria dinámica
-    glBufferData(GL_ARRAY_BUFFER, MAX_VERTICES * sizeof(Vertex), nullptr, GL_DYNAMIC_DRAW);
 
-    // EBO (Indices constantes para Quads)
-    unsigned int indices[MAX_INDICES];
-    int offset = 0;
-    for (int i = 0; i < MAX_INDICES; i += 6) {
-        indices[i + 0] = 0 + offset;
-        indices[i + 1] = 1 + offset;
-        indices[i + 2] = 2 + offset;
-        indices[i + 3] = 2 + offset;
-        indices[i + 4] = 3 + offset;
-        indices[i + 5] = 0 + offset;
-        offset += 4;
-    }
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, batch.EBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+    // Reservar memoria (Buffer huérfano dinámico)
+    glBufferData(GL_ARRAY_BUFFER, batch.MAX_SPRITES * 6 * sizeof(Vertex), nullptr, GL_DYNAMIC_DRAW);
 
-    // Atributos: Pos(2), Tex(2), Color(4)
+    // Atributos: Pos(2) + UV(2) + Color(4) = 8 floats stride
+    // 0: Pos
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
     glEnableVertexAttribArray(0);
+    // 1: UV
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(2 * sizeof(float)));
     glEnableVertexAttribArray(1);
+    // 2: Color
     glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(4 * sizeof(float)));
     glEnableVertexAttribArray(2);
 
-    // Matriz de Proyección (Orto 2D)
-    // Coordenadas internas: 0,0 a 256,224
+    // 3. Configurar Matriz de Proyección (Ortho)
     glUseProgram(batch.shaderProgram);
-    // Matriz Orto manual: 2/w, 2/h, ... simple para 2D
-    // O mejor, usamos una librería math o hardcodeamos la matriz uniforme
-    // Para simplificar y no añadir GLM, calculamos la matriz aquí:
-    float l = 0, r = INTERNAL_W, b = INTERNAL_H, t = 0; // Top-Left origin
+
+    // Matriz Ortográfica Manual (0,0 top-left -> INTERNAL_W, INTERNAL_H bottom-right)
+    float l = 0, r = (float)INTERNAL_W;
+    float b = (float)INTERNAL_H, t = 0; // Invertido Y para coordenadas de pantalla
+
     float ortho[16] = {
-        2.0f/(r-l), 0, 0, 0,
-        0, 2.0f/(t-b), 0, 0,
-        0, 0, -1, 0,
+        2.0f/(r-l),   0,            0, 0,
+        0,            2.0f/(t-b),   0, 0,
+        0,            0,           -1, 0,
         -(r+l)/(r-l), -(t+b)/(t-b), 0, 1
     };
+
     GLint projLoc = glGetUniformLocation(batch.shaderProgram, "projection");
     glUniformMatrix4fv(projLoc, 1, GL_FALSE, ortho);
 }
 
-// Flush: Manda los datos a la GPU
+// Enviar geometría a la GPU
+
+void draw_sprite(GLuint texture, float x, float y, float w, float h,
+                 float u0, float v0, float u1, float v1,
+                 float r, float g, float b, float a)
+{
+    // Si el batch está lleno o cambiamos de textura (opcional), podríamos hacer flush automático.
+    // Por simplicidad en este paso, asumimos una sola textura atlas o que Lua gestiona los cambios.
+    // NOTA: Para un motor real, deberíamos chequear si 'texture' cambia y hacer flush.
+
+    // Si superamos la capacidad, dibujamos lo que hay y limpiamos
+    if (batch.vertices.size() + 6 > batch.MAX_SPRITES * 6) {
+        flush_batch();
+    }
+
+    // Definir los 4 vértices del quad (x, y, u, v, r, g, b, a)
+    // Orden: Top-Left, Bottom-Left, Bottom-Right, Top-Left, Bottom-Right, Top-Right (2 triángulos)
+
+    // Vértices
+    float x1 = x;
+    float y1 = y;
+    float x2 = x + w;
+    float y2 = y + h;
+
+    // Triángulo 1
+    batch.vertices.push_back({x1, y1, u0, v0, r, g, b, a}); // TL
+    batch.vertices.push_back({x1, y2, u0, v1, r, g, b, a}); // BL
+    batch.vertices.push_back({x2, y2, u1, v1, r, g, b, a}); // BR
+
+    // Triángulo 2
+    batch.vertices.push_back({x1, y1, u0, v0, r, g, b, a}); // TL
+    batch.vertices.push_back({x2, y2, u1, v1, r, g, b, a}); // BR
+    batch.vertices.push_back({x2, y1, u1, v0, r, g, b, a}); // TR
+}
+
 void flush_batch() {
-    if (batch.indexCount == 0) return;
+    if (batch.vertices.empty()) return;
 
     glBindBuffer(GL_ARRAY_BUFFER, batch.VBO);
+    // Subir datos
     glBufferSubData(GL_ARRAY_BUFFER, 0, batch.vertices.size() * sizeof(Vertex), batch.vertices.data());
 
-    glBindTexture(GL_TEXTURE_2D, batch.currentTexture);
     glUseProgram(batch.shaderProgram);
     glBindVertexArray(batch.VAO);
 
-    glDrawElements(GL_TRIANGLES, batch.indexCount, GL_UNSIGNED_INT, 0);
+    // Dibujar
+    glDrawArrays(GL_TRIANGLES, 0, batch.vertices.size());
 
+    // Limpiar para el siguiente frame
     batch.vertices.clear();
-    batch.indexCount = 0;
 }
 
-// --- LUA BINDINGS ---
+void set_camera(float x, float y) {
+    // Aseguramos que el shader esté activo
+    glUseProgram(batch.shaderProgram);
 
-// batch.init()
-static int l_batch_init(lua_State* L) {
-    init_renderer();
-    return 0;
-}
+    // Recalcular Matriz Ortográfica
+    // La cámara mueve el "mundo", así que los límites de proyección cambian.
+    // Left = x, Right = x + 256, Bottom = y + 224, Top = y
 
-// batch.begin()
-static int l_batch_begin(lua_State* L) {
-    batch.vertices.clear();
-    batch.indexCount = 0;
-    return 0;
-}
+    float l = x;
+    float r = x + (float)INTERNAL_W;
+    float b = y + (float)INTERNAL_H;
+    float t = y;
 
-// batch.end()
-static int l_batch_end(lua_State* L) {
-    flush_batch();
-    return 0;
-}
-
-// batch.draw(texID, x, y, srcX, srcY, srcW, srcH, flipX)
-static int l_batch_draw(lua_State* L) {
-    GLuint texID = (GLuint)luaL_checkinteger(L, 1);
-    float x = luaL_checknumber(L, 2);
-    float y = luaL_checknumber(L, 3);
-
-    // Source rect (para spritesheets)
-    float sx = luaL_checknumber(L, 4);
-    float sy = luaL_checknumber(L, 5);
-    float sw = luaL_checknumber(L, 6);
-    float sh = luaL_checknumber(L, 7);
-
-    bool flipX = lua_toboolean(L, 8);
-
-    // Cambio de textura = Flush forzoso
-    if (texID != batch.currentTexture) {
-        flush_batch();
-        batch.currentTexture = texID;
-    }
-
-    // Calcular UVs
-    // Necesitamos el tamaño de la textura para normalizar UVs (0.0 - 1.0)
-    // Por simplicidad, asumimos que el usuario o Lua sabe el tamaño o pasamos UVs directas
-    // OJO: Para hacerlo bien, texture.cpp debería guardar tamaños.
-    // HACK TEMPORAL: Consultar tamaño a OpenGL (lento pero funcional)
-    int texW, texH;
-    glBindTexture(GL_TEXTURE_2D, texID);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &texW);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &texH);
-
-    float u0 = sx / texW;
-    float v0 = sy / texH;
-    float u1 = (sx + sw) / texW;
-    float v1 = (sy + sh) / texH;
-
-    if (flipX) { float tmp = u0; u0 = u1; u1 = tmp; }
-
-    // Añadir 4 vértices (Quad)
-    // Top-Left, Bottom-Left, Bottom-Right, Top-Right
-    batch.vertices.push_back({x, y,       u0, v0, 1,1,1,1});
-    batch.vertices.push_back({x, y+sh,    u0, v1, 1,1,1,1});
-    batch.vertices.push_back({x+sw, y+sh, u1, v1, 1,1,1,1});
-    batch.vertices.push_back({x+sw, y,    u1, v0, 1,1,1,1});
-
-    batch.indexCount += 6;
-
-    // Si llenamos el buffer, flush automático
-    if (batch.indexCount >= MAX_INDICES) {
-        flush_batch();
-    }
-
-    return 0;
-}
-
-int luaopen_batch(lua_State* L) {
-    luaL_Reg regs[] = {
-        {"init", l_batch_init},
-        {"begin_draw", l_batch_begin},
-        {"end_draw", l_batch_end},
-        {"draw", l_batch_draw},
-        {NULL, NULL}
+    float ortho[16] = {
+        2.0f/(r-l),   0,            0, 0,
+        0,            2.0f/(t-b),   0, 0,
+        0,            0,           -1, 0,
+        -(r+l)/(r-l), -(t+b)/(t-b), 0, 1
     };
-    luaL_newlib(L, regs);
-    return 1;
+
+    GLint projLoc = glGetUniformLocation(batch.shaderProgram, "projection");
+    glUniformMatrix4fv(projLoc, 1, GL_FALSE, ortho);
 }

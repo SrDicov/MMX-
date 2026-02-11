@@ -1,76 +1,62 @@
-local animator = {}
+-- scripts/core/animator.lua
+local class = require("scripts.core.class")
+local Animator = class()
 
-local Animator = {}
-Animator.__index = Animator
-
--- Configuración de animaciones (Formato estándar)
--- animations = {
---    idle = { texture_id, frames = { {x=0, y=0, w=32, h=32, dur=10}, ... }, loop = true },
---    run  = { ... }
--- }
-function animator.new(animations)
-local self = setmetatable({}, Animator)
-self.anims = animations or {}
+function Animator:init(tex_id, w, h)
+self.tex_id = tex_id
+self.w, self.h = w, h
 self.current_anim = nil
-self.current_name = ""
-self.frame_index = 1
 self.timer = 0
-self.finished = false
-return self
+self.frame = 1
+self.flipped = false
+self.anims = {}
 end
 
-function Animator:set(name)
-if self.current_name == name then return end -- No reiniciar si es la misma
+function Animator:add_anim(name, frames, loop)
+self.anims[name] = { frames = frames, loop = (loop ~= false) }
+end
 
-    local anim = self.anims[name]
-    if not anim then
-        console.error("Animator: Animation '" .. name .. "' not found.")
-        return
-        end
+function Animator:play(name)
+if self.current_anim ~= name then
+    self.current_anim = name
+    self.timer, self.frame = 0, 1
+    end
+    end
 
-        self.current_name = name
-        self.current_anim = anim
-        self.frame_index = 1
-        self.timer = anim.frames[1].dur or 10
-        self.finished = false
-        end
+    function Animator:update(dt)
+    if not self.current_anim then return end
+        local anim = self.anims[self.current_anim]
+        local fr = anim.frames[self.frame]
+        local duration = fr[5] or 0.1
 
-        function Animator:update()
-        if not self.current_anim then return end
+        self.timer = self.timer + dt
+        if self.timer >= duration then
+            self.timer = self.timer - duration
+            self.frame = self.frame + 1
+            if self.frame > #anim.frames then
+                self.frame = anim.loop and 1 or #anim.frames
+                end
+                end
+                end
 
-            -- Si ya terminó y no loopea, no hacer nada
-            if self.finished then return end
+                function Animator:draw(x, y)
+                if not self.current_anim then return end
+                    local anim = self.anims[self.current_anim]
+                    local fr = anim.frames[self.frame]
+                    -- {x, y, w, h, duration}
+                    local fx, fy, fw, fh = fr[1], fr[2], fr[3], fr[4]
 
-                self.timer = self.timer - 1
-                if self.timer <= 0 then
-                    -- Avanzar frame
-                    self.frame_index = self.frame_index + 1
+                    -- Calcular UVs
+                    local u0, v0 = fx/self.w, fy/self.h
+                    local u1, v1 = (fx+fw)/self.w, (fy+fh)/self.h
 
-                    -- Check final
-                    if self.frame_index > #self.current_anim.frames then
-                        if self.current_anim.loop then
-                            self.frame_index = 1
-                            else
-                                self.frame_index = #self.current_anim.frames
-                                self.finished = true
-                                end
-                                end
+                    -- Aplicar Flip
+                    if self.flipped then
+                        local temp = u0; u0 = u1; u1 = temp
+                        end
 
-                                -- Reset timer del nuevo frame
-                                local frame = self.current_anim.frames[self.frame_index]
-                                self.timer = frame.dur or 10
-                                end
-                                end
+                        -- Llamada correcta a nuestro motor C++ (9 argumentos numéricos)
+                        batch.draw(self.tex_id, x, y, fw, fh, u0, v0, u1, v1)
+                        end
 
-                                function Animator:draw(x, y, flip_x)
-                                if not self.current_anim then return end
-
-                                    local frame = self.current_anim.frames[self.frame_index]
-                                    local tex = self.current_anim.texture_id or 0
-
-                                    -- Dibujar usando el Batch Renderer
-                                    -- batch.draw(tex, x, y, src_x, src_y, src_w, src_h, flip)
-                                    batch.draw(tex, x, y, frame.x, frame.y, frame.w, frame.h, flip_x)
-                                    end
-
-                                    return animator
+                        return Animator

@@ -2,103 +2,126 @@
  * src/main.cpp
  * Punto de entrada definitivo del Motor MMX++
  * Compatible con LuaJIT (Lua 5.1)
+ *
+ * Versión final – SIN GLEW (usa GL_GLEXT_PROTOTYPES)
+ * Incluye: SDL2, SDL_image (PNG), SDL_mixer, Lua, OpenGL 3.3 Core
+ * Renderer: init_renderer() en subsistemas, módulo graphics registrado
  */
-#include "engine.hpp"
 
-// Instancia global del estado
+#include "engine.hpp"          // engine.hpp debe definir GL_GLEXT_PROTOTYPES
+#include <SDL2/SDL_image.h>    // Carga de PNG
+#include <iostream>
+
+// Instancia global del motor
 EngineState engine;
 
-// --- Helpers de Logging ---
-void engine_log(const std::string& msg) {
-    std::cout << "[ENGINE] " << msg << std::endl;
-}
+// Declaraciones forward de los módulos Lua (bindings)
+// SIN extern "C" – se compilan como C++
+int luaopen_util(lua_State* L);
+int luaopen_input(lua_State* L);
+int luaopen_audio(lua_State* L);
+int luaopen_graphics(lua_State* L);   // <-- NUEVO: módulo de gráficos
 
-void engine_error(const std::string& msg) {
-    std::cerr << "[FATAL] " << msg << std::endl;
-}
-
-// --- POLYFILL LUA 5.1 ---
-// Implementación manual de luaL_requiref porque LuaJIT no la tiene.
-// Carga un módulo C y lo registra globalmente si se pide.
+// --- POLYFILL luaL_requiref (LuaJIT / Lua 5.1) ---
 void luaL_requiref(lua_State *L, const char *modname, lua_CFunction openf, int glb) {
     lua_pushcfunction(L, openf);
-    lua_pushstring(L, modname);  // Argumento para la función de carga
-    lua_call(L, 1, 1);           // Llama a la función 'openf' -> Retorna el módulo (tabla) en el stack
+    lua_pushstring(L, modname);
+    lua_call(L, 1, 1);                // openf(modname) → tabla del módulo
 
-    // Guardar en package.loaded (_LOADED en el registro)
     lua_getfield(L, LUA_REGISTRYINDEX, "_LOADED");
-    lua_pushvalue(L, -2);        // Copia del módulo
-    lua_setfield(L, -2, modname); // _LOADED[modname] = module
-    lua_pop(L, 1);               // Sacar _LOADED del stack
+    lua_pushvalue(L, -2);             // copia del módulo
+    lua_setfield(L, -2, modname);    // _LOADED[modname] = módulo
+    lua_pop(L, 1);                   // sacar _LOADED
 
-    // Si glb es true, definir como variable global
     if (glb) {
-        lua_pushvalue(L, -1);    // Copia del módulo
-        lua_setglobal(L, modname); // _G[modname] = module
+        lua_pushvalue(L, -1);        // copia del módulo
+        lua_setglobal(L, modname);   // _G[modname] = módulo
     }
-    // El módulo original se queda en el stack (como en Lua 5.2)
+    // El módulo permanece en la cima de la pila (como en Lua 5.2+)
 }
 
-// --- Función Panic (Callback de error para Lua) ---
+// --- Manejador de pánico Lua ---
 int l_panic(lua_State* L) {
     const char* err = lua_tostring(L, -1);
     std::cerr << "\n========================================\n";
     std::cerr << "!!! LUA PANIC !!!\n";
-    std::cerr << "Error: " << (err ? err : "Unknown") << "\n";
-    std::cerr << "========================================\n" << std::endl;
+    std::cerr << "Error: " << (err ? err : "desconocido") << "\n";
+    std::cerr << "========================================\n";
     engine.running = false;
     return 0;
 }
 
-// --- Inicialización ---
+// --- Inicialización de subsistemas ---
 bool init_subsystems() {
-    // 1. SDL
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS) < 0) {
-        engine_error("SDL Init Failed: " + std::string(SDL_GetError()));
+    // 1. SDL2 (video, audio, gamecontroller)
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
+        std::cerr << "[FATAL] SDL Error: " << SDL_GetError() << std::endl;
         return false;
     }
 
-    // 2. OpenGL (3.3 Core)
+    // 2. SDL_image (PNG)
+    int imgFlags = IMG_INIT_PNG;
+    if (!(IMG_Init(imgFlags) & imgFlags)) {
+        std::cerr << "[FATAL] SDL_image Error: " << IMG_GetError() << std::endl;
+        return false;
+    }
+
+    // 3. Configurar OpenGL 3.3 Core
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 
-    // 3. Ventana
-    engine.window = SDL_CreateWindow(
-        ENGINE_NAME,
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        WINDOW_W, WINDOW_H,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
-    );
-
+    // 4. Ventana
+    engine.window = SDL_CreateWindow("Mega Man X++ (Arch Dev)",
+                                     SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                     256 * 3, 224 * 3,
+                                     SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
     if (!engine.window) {
-        engine_error("Window Creation Failed");
+        std::cerr << "[FATAL] Window Error: " << SDL_GetError() << std::endl;
         return false;
     }
 
-    // 4. Contexto GL
+    // 5. Contexto OpenGL
     engine.gl_context = SDL_GL_CreateContext(engine.window);
     if (!engine.gl_context) {
-        engine_error("GL Context Failed");
+        std::cerr << "[FATAL] OpenGL Context Error: " << SDL_GetError() << std::endl;
         return false;
     }
 
-    // 5. GLEW
-    glewExperimental = GL_TRUE;
-    if (glewInit() != GLEW_OK) {
-        engine_error("GLEW Init Failed");
-        return false;
+    // 6. VSync
+    SDL_GL_SetSwapInterval(1);
+
+    // 7. Inicializar sistema de renderizado (batch, shaders, buffers)
+    init_renderer();
+
+    // 8. SDL_mixer (audio)
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
+        std::cerr << "[ERROR] Mixer Error: " << Mix_GetError() << std::endl;
+        // No detenemos el motor, solo se desactiva el audio
+    }
+    Mix_AllocateChannels(32);
+
+    // 9. Gamepad (primer mando compatible)
+    engine.controller = nullptr;
+    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+        if (SDL_IsGameController(i)) {
+            engine.controller = SDL_GameControllerOpen(i);
+            if (engine.controller) {
+                std::cout << "[INPUT] Mando conectado: "
+                << SDL_GameControllerName(engine.controller) << std::endl;
+                break;
+            }
+        }
     }
 
-    SDL_GL_SetSwapInterval(1); // VSync
     return true;
 }
 
+// --- Inicialización de Lua y carga de módulos nativos ---
 bool init_lua() {
     engine.L = luaL_newstate();
     if (!engine.L) return false;
 
-    // Cargar librerías estándar
     luaL_openlibs(engine.L);
 
     // Registrar manejador de pánico
@@ -106,106 +129,138 @@ bool init_lua() {
     lua_pushcfunction(engine.L, l_panic);
     lua_setglobal(engine.L, "panic");
 
-    // --- CARGAR MÓDULOS C++ (Ahora funciona gracias al Polyfill) ---
-    luaL_requiref(engine.L, "input", luaopen_input, 1);
+    // Cargar módulos nativos con luaL_requiref (registro en _LOADED y global)
+    luaL_requiref(engine.L, "util",   luaopen_util,   1);
+    lua_pop(engine.L, 1);
+    luaL_requiref(engine.L, "input",  luaopen_input,  1);
+    lua_pop(engine.L, 1);
+    luaL_requiref(engine.L, "audio",  luaopen_audio,  1);
+    lua_pop(engine.L, 1);
+    // Módulo de gráficos (batch + texture)
+    luaL_requiref(engine.L, "graphics", luaopen_graphics, 1);
     lua_pop(engine.L, 1);
 
-    luaL_requiref(engine.L, "batch", luaopen_batch, 1);
-    lua_pop(engine.L, 1);
+    // Inicializar cachés de audio
+    engine.current_music = nullptr;
+    engine.sfx_cache.clear();
 
-    luaL_requiref(engine.L, "texture", luaopen_texture, 1);
-    lua_pop(engine.L, 1);
-
-    luaL_requiref(engine.L, "console", luaopen_console, 1);
-    lua_pop(engine.L, 1);
-
-    luaL_requiref(engine.L, "util", luaopen_util, 1);
-    lua_pop(engine.L, 1);
-
-    luaL_requiref(engine.L, "sandbox", luaopen_sandbox, 1);
-    lua_pop(engine.L, 1);
-
-    engine_log("Lua Subsystem Initialized");
     return true;
 }
 
-// --- Game Loop ---
+// --- Bucle principal con timestep fijo (60 FPS lógicos) ---
 void run_loop() {
     SDL_Event e;
     engine.last_tick = SDL_GetPerformanceCounter();
+    engine.accumulator = 0.0;
+    double perf_freq = (double)SDL_GetPerformanceFrequency();
 
     while (engine.running) {
-        // 1. Delta Time
+        // Tiempo transcurrido
         Uint64 current_tick = SDL_GetPerformanceCounter();
-        double dt = (double)((current_tick - engine.last_tick) * 1000 / (double)SDL_GetPerformanceFrequency());
-        engine.delta_time = dt / 1000.0;
+        double frame_time = (double)(current_tick - engine.last_tick) / perf_freq;
         engine.last_tick = current_tick;
 
-        if (engine.delta_time > 0.1) engine.delta_time = 0.1;
+        // Espiral de la muerte (máx 0.25s)
+        if (frame_time > 0.25) frame_time = 0.25;
 
-        // 2. Input
+        engine.accumulator += frame_time;
+
+        // Eventos SDL
         while (SDL_PollEvent(&e) != 0) {
-            if (e.type == SDL_QUIT) {
-                engine.running = false;
-            }
+            if (e.type == SDL_QUIT) engine.running = false;
         }
 
-        // 3. Update (Lua)
-        lua_getglobal(engine.L, "_update");
-        if (lua_isfunction(engine.L, -1)) {
-            lua_pushnumber(engine.L, engine.delta_time);
-            if (lua_pcall(engine.L, 1, 0, 0) != LUA_OK) {
-                const char* err = lua_tostring(engine.L, -1);
-                std::cerr << "[LUA ERROR in update] " << err << std::endl;
-                lua_pop(engine.L, 1);
+        // --- Fase de actualización (60 Hz) ---
+        while (engine.accumulator >= engine.MS_PER_UPDATE) {
+            lua_getglobal(engine.L, "_update");
+            if (lua_isfunction(engine.L, -1)) {
+                lua_pushnumber(engine.L, engine.MS_PER_UPDATE);
+                if (lua_pcall(engine.L, 1, 0, 0) != LUA_OK) {
+                    std::cerr << "[UPDATE] " << lua_tostring(engine.L, -1) << std::endl;
+                    lua_pop(engine.L, 1);   // sacar error
+                    engine.running = false;
+                }
+            } else {
+                lua_pop(engine.L, 1);       // sacar lo que no es función
             }
-        } else {
-            lua_pop(engine.L, 1);
+            engine.accumulator -= engine.MS_PER_UPDATE;
         }
 
-        // 4. Draw (Lua)
-        glClearColor(0.1f, 0.1f, 0.15f, 1.0f); // Fondo oscuro
+        // --- Fase de renderizado ---
+        // alpha (interpolación) reservado para futuro
+        // double alpha = engine.accumulator / engine.MS_PER_UPDATE;
+
+        glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         lua_getglobal(engine.L, "_draw");
         if (lua_isfunction(engine.L, -1)) {
             if (lua_pcall(engine.L, 0, 0, 0) != LUA_OK) {
-                const char* err = lua_tostring(engine.L, -1);
-                std::cerr << "[LUA ERROR in draw] " << err << std::endl;
-                lua_pop(engine.L, 1);
+                std::cerr << "[DRAW] " << lua_tostring(engine.L, -1) << std::endl;
+                lua_pop(engine.L, 1);       // sacar error
+                // No detenemos el motor por errores de dibujo
             }
         } else {
-            lua_pop(engine.L, 1);
+            lua_pop(engine.L, 1);           // sacar valor que no es función
         }
 
         SDL_GL_SwapWindow(engine.window);
     }
 }
 
-// --- Main ---
-int main(int argc, char* argv[]) {
-    engine_log("Booting System...");
+// --- Limpieza de recursos ---
+void cleanup() {
+    if (engine.L) lua_close(engine.L);
 
+    // Audio cache
+    for (auto const& [path, chunk] : engine.sfx_cache) {
+        Mix_FreeChunk(chunk);
+    }
+    if (engine.current_music) Mix_FreeMusic(engine.current_music);
+    Mix_CloseAudio();
+
+    // Game controller
+    if (engine.controller) SDL_GameControllerClose(engine.controller);
+
+    // OpenGL y ventana
+    SDL_GL_DeleteContext(engine.gl_context);
+    SDL_DestroyWindow(engine.window);
+
+    // SDL_image y SDL
+    IMG_Quit();
+    SDL_Quit();
+}
+
+// --- Punto de entrada ---
+int main(int argc, char* argv[]) {
     if (!init_subsystems()) return 1;
     if (!init_lua()) return 1;
 
-    // Cargar Script de Arranque
+    // Script de arranque (por defecto o pasado por argumento)
     std::string boot_script = "scripts/main.lua";
     if (argc > 1) boot_script = argv[1];
 
     if (luaL_dofile(engine.L, boot_script.c_str()) != LUA_OK) {
-        const char* err = lua_tostring(engine.L, -1);
-        engine_error("Failed to load boot script: " + std::string(err));
+        std::cerr << "[LUA ERROR] " << lua_tostring(engine.L, -1) << std::endl;
         return 1;
     }
 
-    engine_log("Entering Game Loop");
+    // Llamar a _init() si existe
+    lua_getglobal(engine.L, "_init");
+    if (lua_isfunction(engine.L, -1)) {
+        if (lua_pcall(engine.L, 0, 0, 0) != LUA_OK) {
+            std::cerr << "[LUA _init] " << lua_tostring(engine.L, -1) << std::endl;
+            lua_pop(engine.L, 1);
+            return 1;
+        }
+    } else {
+        lua_pop(engine.L, 1);
+    }
+
+    // ¡Arrancar el motor!
+    engine.running = true;
     run_loop();
 
-    // Cleanup
-    lua_close(engine.L);
-    SDL_DestroyWindow(engine.window);
-    SDL_Quit();
-
+    cleanup();
     return 0;
 }
